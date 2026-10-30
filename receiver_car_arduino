@@ -1,113 +1,90 @@
-// Gesture Controlled Robot - RECEIVER (Car side)
-// Compatible with the transmitter code (same pipe, same int data[2] packet)
-// Board: Arduino Uno or Nano
+const int ENA = 9;   
+const int IN1 = 7;  
+const int IN2 = 6;
+const int IN3 = 5;   
+const int IN4 = 4;
+const int ENB = 3;   
 
-#include <SPI.h>
-#include "RF24.h"
+const long BT_BAUD     = 9600;   
+const int  SPEED       = 200;    
+const int  TURN_SPEED  = 170;    
+const unsigned long TIMEOUT = 500; 
 
-// ---------- L298N motor driver pins ----------
-const int enbA = 3;   // Right motor speed (PWM)  -> remove ENA jumper on L298N
-const int enbB = 6;   // Left motor speed (PWM)   -> remove ENB jumper on L298N
-const int IN1  = 2;   // Right motor
-const int IN2  = 4;   // Right motor
-const int IN3  = 5;   // Left motor
-const int IN4  = 7;   // Left motor
-// If a motor spins the wrong way, swap its two IN pin numbers above.
+const bool TEST_MODE = false;
 
-// ---------- Speeds (0-255) ----------
-int RightSpd = 200;
-int LeftSpd  = 250;   // adjust both until the car drives straight
+unsigned long lastCmdTime = 0;
+char currentCmd = 'S';
 
-// ---------- Gesture thresholds ----------
-// Transmitter sends X around 350 and Y around 150 when the hand is flat.
-const int X_CENTER  = 350;
-const int Y_CENTER  = 150;
-const int DEAD_ZONE = 10;    // same as original thresholds (340/360, 140/160)
 
-// ---------- Safety ----------
-const unsigned long SIGNAL_TIMEOUT = 500;  // ms: stop if no signal
 
-// ---------- Radio ----------
-int data[2];
-RF24 radio(8, 9);                          // CE = 8, CSN = 9
-const uint64_t pipe = 0xE8E8F0F0E1LL;      // must match transmitter
+void motor(int en, int inA, int inB, int dir, int spd) {
+  if (dir > 0)      { digitalWrite(inA, HIGH); digitalWrite(inB, LOW);  }
+  else if (dir < 0) { digitalWrite(inA, LOW);  digitalWrite(inB, HIGH); }
+  else              { digitalWrite(inA, LOW);  digitalWrite(inB, LOW);  spd = 0; }
+  analogWrite(en, spd);   
 
-// ---------- State ----------
-enum Move { STOP, FORWARD, BACKWARD, LEFT, RIGHT };
-const char* moveNames[] = { "stop", "forward", "backward", "left", "right" };
-Move currentMove = STOP;
-unsigned long lastReceived = 0;
+void leftMotor(int dir, int spd)  { motor(ENA, IN1, IN2, dir, spd); }
+void rightMotor(int dir, int spd) { motor(ENB, IN3, IN4, dir, spd); }
 
-void setMotors(int in1, int in2, int in3, int in4, int spdR, int spdL) {
-  digitalWrite(IN1, in1);
-  digitalWrite(IN2, in2);
-  digitalWrite(IN3, in3);
-  digitalWrite(IN4, in4);
-  analogWrite(enbA, spdR);
-  analogWrite(enbB, spdL);
-}
+void forward()  { leftMotor( 1, SPEED);      rightMotor( 1, SPEED);      }
+void backward() { leftMotor(-1, SPEED);      rightMotor(-1, SPEED);      }
+void turnLeft() { leftMotor(-1, TURN_SPEED); rightMotor( 1, TURN_SPEED); }
+void turnRight(){ leftMotor( 1, TURN_SPEED); rightMotor(-1, TURN_SPEED); }
+void stopCar()  { leftMotor( 0, 0);          rightMotor( 0, 0);          }
 
-void applyMove(Move m) {
-  switch (m) {
-    case FORWARD:  setMotors(HIGH, LOW,  HIGH, LOW,  RightSpd, LeftSpd); break;
-    case BACKWARD: setMotors(LOW,  HIGH, LOW,  HIGH, RightSpd, LeftSpd); break;
-    case RIGHT:    setMotors(LOW,  HIGH, HIGH, LOW,  RightSpd, LeftSpd); break;
-    case LEFT:     setMotors(HIGH, LOW,  LOW,  HIGH, RightSpd, LeftSpd); break;
-    default:       setMotors(LOW,  LOW,  LOW,  LOW,  0, 0);              break;
-  }
-  if (m != currentMove) {          // print only when the movement changes
-    currentMove = m;
-    Serial.println(moveNames[m]);
+void execute(char c) {
+  switch (c) {
+    case 'F': forward();   break;
+    case 'B': backward();  break;
+    case 'L': turnLeft();  break;
+    case 'R': turnRight(); break;
+    default:  stopCar();   break;   
   }
 }
 
-// One clear decision per packet: the stronger tilt wins.
-Move decideMove(int x, int y) {
-  int dx = x - X_CENTER;
-  int dy = y - Y_CENTER;
-  int adx = abs(dx);
-  int ady = abs(dy);
-  bool xActive = adx > DEAD_ZONE;
-  bool yActive = ady > DEAD_ZONE;
-
-  if (!xActive && !yActive) return STOP;
-  if (xActive && (!yActive || adx >= ady)) {
-    return (dx < 0) ? FORWARD : BACKWARD;   // X < 340 forward, X > 360 backward
+-
+void runTest() {
+  const char seq[] = {'F', 'S', 'B', 'S', 'L', 'S', 'R', 'S'};
+  for (char c : seq) {
+    execute(c);
+    delay(c == 'S' ? 700 : 1500);
   }
-  return (dy > 0) ? RIGHT : LEFT;           // Y > 160 right,   Y < 140 left
 }
 
 void setup() {
-  pinMode(enbA, OUTPUT);
-  pinMode(enbB, OUTPUT);
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
-  setMotors(LOW, LOW, LOW, LOW, 0, 0);     // start stopped
+  pinMode(ENA, OUTPUT); pinMode(ENB, OUTPUT);
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
+  stopCar();
 
-  Serial.begin(9600);
-  if (!radio.begin()) {
-    Serial.println("nRF24L01 NOT responding! Check wiring (3.3V, CE=8, CSN=9)");
+  Serial.begin(BT_BAUD);      
+  delay(1000);                
+
+  if (TEST_MODE) {
+    runTest();
+    while (true) {}           
   }
-  radio.openReadingPipe(1, pipe);
-  radio.startListening();
-  Serial.println("Receiver ready");
 }
 
+
 void loop() {
-  if (radio.available()) {
-    radio.read(data, sizeof(data));
-
-    // Ignore corrupted packets (valid X ~254-446, Y ~54-246)
-    if (data[0] >= 250 && data[0] <= 450 && data[1] >= 50 && data[1] <= 250) {
-      lastReceived = millis();
-      applyMove(decideMove(data[0], data[1]));
+  
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'F' || c == 'B' || c == 'L' || c == 'R' || c == 'S') {
+      lastCmdTime = millis();
+      if (c != currentCmd) {
+        currentCmd = c;
+        execute(currentCmd);
+      }
     }
+
+
+  if (currentCmd != 'S' && millis() - lastCmdTime > TIMEOUT) {
+    currentCmd = 'S';
+    stopCar();
   }
 
-  // Failsafe: stop the car if the signal is lost
-  if (millis() - lastReceived > SIGNAL_TIMEOUT) {
-    applyMove(STOP);
-  }
+  digitalWrite(LED_BUILTIN, currentCmd != 'S');
 }
